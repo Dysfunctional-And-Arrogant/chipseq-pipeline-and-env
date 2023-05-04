@@ -1,0 +1,76 @@
+设备简介：
+	移动硬盘
+	6核12线程PC
+
+运行代码
+	【数据质控】
+	cd primary
+	path=$1
+	gzfiles=$(ls $path)
+	for gzname in $gzfiles
+	do fastqc -o ../qc -t 6 $gzname
+	done
+	cd ../qc
+	multiqc *.zip
+	cd ..
+	
+	【下载hg38基因组、通过bwa构建基因组索引并将ChIP测序结果和人类基因组进行比对】
+	cd genome
+	(说明：从UCSC上自行下载hg38文件，也可以用wget下载，随后用md5sum.txt文件验证基因组完整性)
+	md5sum hg38.fa.gz
+	gzip -d hg38.fa.gz
+	(备注：会自动删除hg38.fa.gz，生成hg38.fa)
+	nohup bwa index -p bwa_hg38.fa hg38.fa &
+	(备注：在命令的末尾加个&符号后，程序可以在后台运行，但是一旦当前终端关闭，即退出当前帐户，该程序就会停止运行；当我们想要退出当前终端，但又想让程序在后台运行时，使用nohup命令)
+	(备注2：bwa是一种能够将差异度较小的序列比对到一个较大的参考基因组上的软件包，总共有三种算法，bwa-backtrack、bwa-sw、bwa-mem。三种算法各有优劣，但无论哪种算法，使用之前需运行bwa index命令构建出参考基因组的FM-index。
+	bwa index Usage：
+		bwa index [ –p prefix ] [ –a algoType ] <in.db.fasta>
+	OPTIONS: 
+		-p STR   输出数据库的前缀；【默认和输入的文件名一致，输出的数据库在其输入文件所在的文件夹，并以该文件名为前缀。】
+		-a [is|bwtsw]   构建index的算法，有两个算法： is 是默认的算法，虽然相对较快，但是需要较大的内存，当构建的数据库大于
+               	2GB的时候就不能正常工作了。 bwtsw 对于短的参考序列式不工作的，必须要大于等于10MB, 但能用于较大的基因组数据，比如人的全基因组。
+	#根据reference genome data(e.g. ref.fa) 建立 Index File例子：
+	$ bwa index ref.fa -p genome###可以不加-p genome，这样建立索引都是以ref.fa为前缀)
+	(备注3：实际上，对于hg38这样大于2GB的基因组文件，应该加上参数-a bwtsw，但该算法对CPU和内存的要求较高，故使用默认is算法。即使这样，在PC上运行仍十分吃力)
+	bwa mem <测序文件> -t 4 -M >sample_bwa.sam
+	(备注：mem 使用MEMs(maximal exact matches）进行seedling alignments, 再使用SW(affine-gap Smith-Waterman 算法）进行seeding extending，是一种局部比对。因此，对于一条序列的不同区域可能会产生多种最优匹配结果，这对于long reads 来说尤为重要。有些软件如 Picard’s markDuplicates 跟 mem 的这种剪接性比对不兼容,在这种情况下，可以使用 –M 选项来将 shorter split hits 标记为次优)
+	samtools view -bq 1 bwa.sam > unique.bam	
+
+	【MACS2 callpeak】
+	（说明：先用IGV检查比对的结果，即bam文件，这里因为电脑硬件限制使用的是在师兄电脑上运行的结果，程序是一样的）
+	mkdir MACS2_peaks
+	macs2 callpeak -t 比对结果.bam -f BAM -B -g hs -n MACS_结果 --outdir ./MACS2_peaks
+	#得到差异文件
+	bedtools subtract -a MACS2_MESSA-FOXM1_rmdup_peaks.narrowPeak -b MACS2_ECC-1_FOXM1_rmdup_peaks.narrowPeak \
+									MACS2_GM12878_FOXM1_rmdup_peaks.narrowPeak \
+									MACS2_MCF-7_FOXM1_rmdup_peaks.narrowPeak \
+									MACS2_SK-N-SH_FOXM1_rmdup_peaks.narrowPeak -A > MESSA_subtract.narrowPeak
+	
+	【bam文件转bw，并绘制TSS plot，以MESSA文件为例】
+	bamCoverage --bin MESSA_FOXM1_rmdup.bam -o ./bw/MESSA_FOXM1_rmdup.bw --binSize 10 --normalizeUsing RPGC --effectiveGenomeSize 2701495761 --numberOfProcessors 5
+	cd bw
+	mkdir TSS_png TSS_bed TSS_gz TSS_kmeans_png
+	#computeMatrix理应上讲可以一次性计算好几个bw文件得到一个matrix，然后得到一张图（而不是一个细胞一张图），但是我试了，一次算了ECC-1、GM12878、MCF-7、MESSA和SK-N-SH五个细胞系的bed文件，跑了四个小时结果最后电脑卡死（内存占满），所以终止并每个细胞系单独计算了
+	#UCSC上可以下载hg38的基因注释文件，https://genome.ucsc.edu，Tools -> Table Browser -> clade: Mammal; genome: Human; assembly: Dec. 2013(GRCh38/hg38); group: Genes and Gene Predictions; track: NCBI RefSeq; table: RefSeq All(ncbiRefSeq); region: genome;output format:BED; output filename: hg38.tss.bed -> 点击get output
+	computeMatrix reference-point --referencePoint TSS -b 3000 -a 3000 -S MESSA_FOXM1_rmdup.bw -R hg38.tss.bed --skipZeros -o ./TSS_gz/MESSA_FOXM1_rmdup_TSS.gz --outFileSortedRegions ./TSS_bed/MESSA_FOXM1_rmdup.bed
+	#画图，看到有的tutorial上说可以聚类，但不知道有什么用，先画了一个出来
+	plotHeatmap -m ./TSS_gz/MESSA_FOXM1_rmdup_TSS.gz -o ./TSS_png/MESSA_FOXM1_rmdup_TSS.png
+	plotHeatmap -m ./TSS_gz/MESSA_FOXM1_rmdup_TSS.gz -o ./TSS_png/MESSA_FOXM1_rmdup_TSS.png --kmeans 4
+	
+	【peak annotation及GO Enrichment】
+	#这部分用R做的，R History和R Script保留下来了
+
+	【motif分析】
+	#继续在chipseq的conda环境中
+	conda search homer -c bioconda
+	conda install -c bioconda homer
+	cd ~/anaconda3
+	find -name homer
+	cd envs/chipseq/share/homer
+	perl configureHomer.pl -install hg38
+	cd /mnt/f/ChIP_FOXM1/rmdup/MACS2_peaks
+	mkdir motif
+	cd motif
+	mkdir ECC-1_FOXM1 GM12878_FOXM1 MCF-7_FOXM1 MESSA_FOXM1 SK-N-SH_FOXM1 bed
+	#bed文件夹用于存放MACS2_peaks下的bed文件，复制过来即可，下面命令同样以MESSA为例
+	findMotifsGenome.pl bed/MACS2_MESSA-FOXM1_rmdup_peaks.narrowPeak hg38 MESSA/ -size 200
